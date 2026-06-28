@@ -100,6 +100,7 @@ export interface NowPlaying {
   title: string
   artist: string
   album: string
+  albumArt: string
   progressMs: number
   durationMs: number
 }
@@ -121,6 +122,7 @@ export async function getNowPlaying(): Promise<NowPlaying | null> {
     title: data.item.name,
     artist: data.item.artists?.[0]?.name ?? '',
     album: data.item.album?.name ?? '',
+    albumArt: data.item.album?.images?.[0]?.url ?? '',
     progressMs: data.progress_ms ?? 0,
     durationMs: data.item.duration_ms ?? 0,
   }

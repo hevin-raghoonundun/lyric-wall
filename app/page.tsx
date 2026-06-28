@@ -8,6 +8,7 @@ interface Song {
   title: string
   artist: string
   album: string
+  albumArt: string
   progressMs: number
   detectedAt: number
 }
@@ -27,24 +28,14 @@ export default function Home() {
   const containerRef = useRef<HTMLDivElement>(null)
   const lineRefs = useRef<(HTMLDivElement | null)[]>([])
 
-  useEffect(() => {
-    songRef.current = song
-  }, [song])
+  useEffect(() => { songRef.current = song }, [song])
 
-  // Check login state on mount (localStorage is client-only)
-  useEffect(() => {
-    setLoggedIn(isLoggedIn())
-  }, [])
+  useEffect(() => { setLoggedIn(isLoggedIn()) }, [])
 
   const fetchLyrics = useCallback(async (np: NowPlaying) => {
-    const params = new URLSearchParams({
-      title: np.title,
-      artist: np.artist,
-      album: np.album,
-    })
+    const params = new URLSearchParams({ title: np.title, artist: np.artist, album: np.album })
     const res = await fetch(`/api/lyrics?${params}`)
     if (!res.ok) return
-
     const data = await res.json()
     if (data.synced) setLines(parseLrc(data.synced))
     else if (data.plain) setPlain(data.plain)
@@ -61,6 +52,7 @@ export default function Home() {
       title: np.title,
       artist: np.artist,
       album: np.album,
+      albumArt: np.albumArt,
       progressMs: np.progressMs,
       detectedAt: Date.now(),
     }
@@ -76,7 +68,6 @@ export default function Home() {
     }
   }, [fetchLyrics])
 
-  // Start polling when logged in
   useEffect(() => {
     if (!loggedIn) return
     setPolling(true)
@@ -85,7 +76,6 @@ export default function Home() {
     return () => { clearInterval(id); setPolling(false) }
   }, [loggedIn, poll])
 
-  // Tick elapsed time between polls using detectedAt + initial progressMs
   useEffect(() => {
     if (!song) return
     const interval = setInterval(() => {
@@ -94,13 +84,11 @@ export default function Home() {
     return () => clearInterval(interval)
   }, [song])
 
-  // Derive current lyric line
   useEffect(() => {
     if (!lines.length) return
     setCurrent(getCurrentLineIndex(lines, elapsed))
   }, [elapsed, lines])
 
-  // Scroll current line to center
   useEffect(() => {
     const el = lineRefs.current[current]
     const container = containerRef.current
@@ -117,7 +105,6 @@ export default function Home() {
     setPlain(null)
   }
 
-  // Login screen
   if (!loggedIn) {
     return (
       <main className="h-full flex flex-col items-center justify-center bg-black text-white gap-8">
@@ -141,29 +128,78 @@ export default function Home() {
   }
 
   return (
-    <main className="h-full flex flex-col overflow-hidden select-none bg-black text-white">
-      {/* Song header */}
-      {song && (
-        <div className="flex-shrink-0 px-10 pt-10 pb-2 flex items-start justify-between">
-          <div>
-            <p className="text-5xl font-bold tracking-tight leading-tight">{song.title}</p>
-            <p className="text-2xl mt-2" style={{ color: 'rgba(255,255,255,0.4)' }}>
-              {song.artist}
-            </p>
-          </div>
-          <button
-            onClick={handleLogout}
-            className="text-sm mt-1 transition-colors"
-            style={{ color: 'rgba(255,255,255,0.2)' }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
-            onMouseLeave={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.2)')}
-          >
-            logout
-          </button>
-        </div>
-      )}
+    <main className="h-full flex overflow-hidden select-none bg-black text-white">
 
-      {/* Main content */}
+      {/* LEFT PANEL — album art + song info */}
+      <div
+        className="flex-shrink-0 flex flex-col justify-between"
+        style={{ width: '38%', padding: '48px 40px', borderRight: '1px solid rgba(255,255,255,0.07)' }}
+      >
+        {/* Album art */}
+        <div className="flex-1 flex items-center justify-center">
+          {song?.albumArt ? (
+            <img
+              key={song.albumArt}
+              src={song.albumArt}
+              alt="Album art"
+              className="rounded-2xl"
+              style={{ width: '100%', maxWidth: '420px', aspectRatio: '1', objectFit: 'cover' }}
+            />
+          ) : (
+            <div
+              className="rounded-2xl"
+              style={{
+                width: '100%',
+                maxWidth: '420px',
+                aspectRatio: '1',
+                background: 'rgba(255,255,255,0.05)',
+              }}
+            />
+          )}
+        </div>
+
+        {/* Song info */}
+        <div className="flex-shrink-0 mt-8">
+          {song ? (
+            <>
+              <p className="text-4xl font-bold leading-tight" style={{ wordBreak: 'break-word' }}>
+                {song.title}
+              </p>
+              <p className="text-2xl mt-2" style={{ color: 'rgba(255,255,255,0.45)' }}>
+                {song.artist}
+              </p>
+              <p className="text-base mt-1" style={{ color: 'rgba(255,255,255,0.2)' }}>
+                {song.album}
+              </p>
+            </>
+          ) : (
+            <p className="text-xl" style={{ color: 'rgba(255,255,255,0.25)' }}>
+              Waiting for Spotify…
+            </p>
+          )}
+
+          {/* Footer */}
+          <div className="flex items-center justify-between mt-6">
+            <div className="flex items-center gap-2">
+              <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#1DB954' }} />
+              <span className="text-sm" style={{ color: 'rgba(255,255,255,0.25)' }}>
+                {polling ? 'Live via Spotify' : 'Spotify'}
+              </span>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="text-sm transition-colors"
+              style={{ color: 'rgba(255,255,255,0.18)' }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
+              onMouseLeave={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.18)')}
+            >
+              logout
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* RIGHT PANEL — lyrics */}
       <div className="flex-1 relative overflow-hidden">
         {/* Top fade */}
         <div
@@ -193,14 +229,14 @@ export default function Home() {
                   : Math.abs(dist) <= 3 ? 0.2
                   : 0.07
                 const fontSize =
-                  isCurrent ? '3rem'
-                  : Math.abs(dist) === 1 ? '2.25rem'
-                  : '1.875rem'
+                  isCurrent ? '2.5rem'
+                  : Math.abs(dist) === 1 ? '1.875rem'
+                  : '1.5rem'
                 return (
                   <div
                     key={i}
                     ref={(el) => { lineRefs.current[i] = el }}
-                    className="py-3 leading-tight transition-all duration-500 ease-out"
+                    className="py-2 leading-tight transition-all duration-500 ease-out"
                     style={{ opacity, fontSize, fontWeight: isCurrent ? 700 : 400 }}
                   >
                     {line.text}
@@ -217,10 +253,7 @@ export default function Home() {
             className="absolute inset-0 overflow-y-auto px-10 py-10"
             style={{ scrollbarWidth: 'none' } as React.CSSProperties}
           >
-            <p
-              className="text-2xl leading-relaxed whitespace-pre-line"
-              style={{ color: 'rgba(255,255,255,0.6)' }}
-            >
+            <p className="text-2xl leading-relaxed whitespace-pre-line" style={{ color: 'rgba(255,255,255,0.6)' }}>
               {plain}
             </p>
           </div>
@@ -240,23 +273,13 @@ export default function Home() {
                 ))}
               </div>
             )}
-            <p className="text-xl" style={{ color: 'rgba(255,255,255,0.3)' }}>
-              {song
-                ? `${song.title} · ${song.artist}`
-                : 'Waiting for music to play on Spotify…'}
+            <p className="text-xl" style={{ color: 'rgba(255,255,255,0.25)' }}>
+              {song ? 'Loading lyrics…' : 'Play something on Spotify'}
             </p>
           </div>
         )}
       </div>
 
-      {/* Status bar */}
-      <div
-        className="flex-shrink-0 px-10 pb-6 pt-2 flex justify-between items-center text-sm"
-        style={{ color: 'rgba(255,255,255,0.15)' }}
-      >
-        <span>{polling ? 'Listening via Spotify…' : ''}</span>
-        <span>lyric wall</span>
-      </div>
     </main>
   )
 }
