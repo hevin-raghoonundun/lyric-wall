@@ -2,34 +2,28 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { parseLrc, getCurrentLineIndex, type LrcLine } from '@/lib/lrc'
+import { getNowPlaying, isLoggedIn, startAuth, logout, type NowPlaying } from '@/lib/spotify'
 
 interface Song {
   title: string
   artist: string
   album: string
-  offsetSeconds: number
+  progressMs: number
   detectedAt: number
 }
 
-type Status = 'idle' | 'requesting' | 'listening' | 'identifying' | 'error'
-
-// 4 seconds keeps PCM payload under 500KB (Shazam's limit)
-const RECORD_MS = 4000
-// 30 seconds between polls to stay within free tier (500 req/month)
-const POLL_MS = 30000
+const POLL_MS = 3000
 
 export default function Home() {
-  const [status, setStatus] = useState<Status>('idle')
+  const [loggedIn, setLoggedIn] = useState(false)
   const [song, setSong] = useState<Song | null>(null)
   const [lines, setLines] = useState<LrcLine[]>([])
   const [plain, setPlain] = useState<string | null>(null)
   const [current, setCurrent] = useState(0)
   const [elapsed, setElapsed] = useState(0)
-  const [micError, setMicError] = useState(false)
+  const [polling, setPolling] = useState(false)
 
-  const streamRef = useRef<MediaStream | null>(null)
   const songRef = useRef<Song | null>(null)
-  const recordingRef = useRef(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const lineRefs = useRef<(HTMLDivElement | null)[]>([])
 
@@ -37,142 +31,76 @@ export default function Home() {
     songRef.current = song
   }, [song])
 
-  const identify = useCallback(async () => {
-    if (recordingRef.current || !streamRef.current) return
-    recordingRef.current = true
-    setStatus('identifying')
-
-    try {
-      const stream = streamRef.current
-
-      // Shazam requires 44100Hz mono 16-bit PCM — capture via Web Audio API
-      const audioCtx = new AudioContext({ sampleRate: 44100 })
-      const source = audioCtx.createMediaStreamSource(stream)
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1)
-      const silence = audioCtx.createGain()
-      silence.gain.value = 0
-
-      const floatChunks: Float32Array[] = []
-      processor.onaudioprocess = (e) => {
-        floatChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
-      }
-
-      source.connect(processor)
-      processor.connect(silence)
-      silence.connect(audioCtx.destination)
-
-      await new Promise<void>((resolve) => setTimeout(resolve, RECORD_MS))
-
-      processor.disconnect()
-      source.disconnect()
-      audioCtx.close()
-
-      if (!floatChunks.length) return
-
-      // Merge chunks and convert Float32 → Int16 PCM
-      const totalSamples = floatChunks.reduce((s, c) => s + c.length, 0)
-      const float32 = new Float32Array(totalSamples)
-      let pos = 0
-      for (const chunk of floatChunks) { float32.set(chunk, pos); pos += chunk.length }
-
-      const int16 = new Int16Array(float32.length)
-      for (let i = 0; i < float32.length; i++) {
-        int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768))
-      }
-
-      // Base64 encode the raw PCM bytes
-      const uint8 = new Uint8Array(int16.buffer)
-      let binary = ''
-      for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i])
-      const audio = btoa(binary)
-
-      const r = await fetch('/api/recognize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ audio }),
-      })
-      if (!r.ok) return
-
-      const data = await r.json()
-      const newSong: Song = {
-        title: data.title,
-        artist: data.artist,
-        album: data.album,
-        offsetSeconds: data.offsetSeconds + RECORD_MS / 1000,
-        detectedAt: Date.now(),
-      }
-
-      const prev = songRef.current
-      const isNew = !prev || prev.title !== newSong.title || prev.artist !== newSong.artist
-
-      setSong(newSong)
-
-      if (isNew) {
-        setLines([])
-        setPlain(null)
-        setCurrent(0)
-        setElapsed(newSong.offsetSeconds)
-
-        const params = new URLSearchParams({
-          title: newSong.title,
-          artist: newSong.artist,
-          album: newSong.album,
-        })
-        const lr = await fetch(`/api/lyrics?${params}`)
-        if (lr.ok) {
-          const ld = await lr.json()
-          if (ld.synced) setLines(parseLrc(ld.synced))
-          else if (ld.plain) setPlain(ld.plain)
-        }
-      }
-    } catch (e) {
-      console.error('identify error:', e)
-    } finally {
-      recordingRef.current = false
-      setStatus('listening')
-    }
+  // Check login state on mount (localStorage is client-only)
+  useEffect(() => {
+    setLoggedIn(isLoggedIn())
   }, [])
 
-  // Init mic and polling loop
-  useEffect(() => {
-    let intervalId: ReturnType<typeof setInterval>
-    setStatus('requesting')
+  const fetchLyrics = useCallback(async (np: NowPlaying) => {
+    const params = new URLSearchParams({
+      title: np.title,
+      artist: np.artist,
+      album: np.album,
+    })
+    const res = await fetch(`/api/lyrics?${params}`)
+    if (!res.ok) return
 
-    navigator.mediaDevices
-      .getUserMedia({ audio: true, video: false })
-      .then((stream) => {
-        streamRef.current = stream
-        setStatus('listening')
-        identify()
-        intervalId = setInterval(identify, POLL_MS)
-      })
-      .catch(() => {
-        setMicError(true)
-        setStatus('error')
-      })
+    const data = await res.json()
+    if (data.synced) setLines(parseLrc(data.synced))
+    else if (data.plain) setPlain(data.plain)
+  }, [])
 
-    return () => {
-      clearInterval(intervalId)
-      streamRef.current?.getTracks().forEach((t) => t.stop())
+  const poll = useCallback(async () => {
+    const np = await getNowPlaying()
+    if (!np) return
+
+    const prev = songRef.current
+    const isNew = !prev || prev.title !== np.title || prev.artist !== np.artist
+
+    const newSong: Song = {
+      title: np.title,
+      artist: np.artist,
+      album: np.album,
+      progressMs: np.progressMs,
+      detectedAt: Date.now(),
     }
-  }, [identify])
 
-  // Tick song position every 100ms
+    setSong(newSong)
+
+    if (isNew) {
+      setLines([])
+      setPlain(null)
+      setCurrent(0)
+      setElapsed(np.progressMs / 1000)
+      await fetchLyrics(np)
+    }
+  }, [fetchLyrics])
+
+  // Start polling when logged in
+  useEffect(() => {
+    if (!loggedIn) return
+    setPolling(true)
+    poll()
+    const id = setInterval(poll, POLL_MS)
+    return () => { clearInterval(id); setPolling(false) }
+  }, [loggedIn, poll])
+
+  // Tick elapsed time between polls using detectedAt + initial progressMs
   useEffect(() => {
     if (!song) return
     const interval = setInterval(() => {
-      setElapsed((Date.now() - song.detectedAt) / 1000 + song.offsetSeconds)
+      setElapsed((Date.now() - song.detectedAt) / 1000 + song.progressMs / 1000)
     }, 100)
     return () => clearInterval(interval)
   }, [song])
 
-  // Derive current lyric line from elapsed time
+  // Derive current lyric line
   useEffect(() => {
     if (!lines.length) return
     setCurrent(getCurrentLineIndex(lines, elapsed))
   }, [elapsed, lines])
 
-  // Scroll current line to center of the container
+  // Scroll current line to center
   useEffect(() => {
     const el = lineRefs.current[current]
     const container = containerRef.current
@@ -181,34 +109,68 @@ export default function Home() {
     container.scrollTo({ top, behavior: 'smooth' })
   }, [current])
 
-  const statusLabel: Record<Status, string> = {
-    idle: '',
-    requesting: 'Requesting microphone…',
-    listening: 'Listening…',
-    identifying: 'Identifying song…',
-    error: 'Microphone access denied',
+  const handleLogout = () => {
+    logout()
+    setLoggedIn(false)
+    setSong(null)
+    setLines([])
+    setPlain(null)
+  }
+
+  // Login screen
+  if (!loggedIn) {
+    return (
+      <main className="h-full flex flex-col items-center justify-center bg-black text-white gap-8">
+        <div className="text-center">
+          <p className="text-5xl font-bold mb-3">Lyric Wall</p>
+          <p className="text-xl" style={{ color: 'rgba(255,255,255,0.4)' }}>
+            Connect Spotify to display live lyrics
+          </p>
+        </div>
+        <button
+          onClick={() => startAuth()}
+          className="flex items-center gap-3 bg-[#1DB954] hover:bg-[#1ed760] text-black font-bold text-lg px-8 py-4 rounded-full transition-colors"
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z" />
+          </svg>
+          Login with Spotify
+        </button>
+      </main>
+    )
   }
 
   return (
     <main className="h-full flex flex-col overflow-hidden select-none bg-black text-white">
       {/* Song header */}
       {song && (
-        <div className="flex-shrink-0 px-10 pt-10 pb-2">
-          <p className="text-5xl font-bold tracking-tight leading-tight">{song.title}</p>
-          <p className="text-2xl mt-2" style={{ color: 'rgba(255,255,255,0.4)' }}>
-            {song.artist}
-          </p>
+        <div className="flex-shrink-0 px-10 pt-10 pb-2 flex items-start justify-between">
+          <div>
+            <p className="text-5xl font-bold tracking-tight leading-tight">{song.title}</p>
+            <p className="text-2xl mt-2" style={{ color: 'rgba(255,255,255,0.4)' }}>
+              {song.artist}
+            </p>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="text-sm mt-1 transition-colors"
+            style={{ color: 'rgba(255,255,255,0.2)' }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
+            onMouseLeave={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.2)')}
+          >
+            logout
+          </button>
         </div>
       )}
 
       {/* Main content */}
       <div className="flex-1 relative overflow-hidden">
-        {/* Top fade overlay */}
+        {/* Top fade */}
         <div
           className="pointer-events-none absolute inset-x-0 top-0 z-10 h-24"
           style={{ background: 'linear-gradient(to bottom, #000, transparent)' }}
         />
-        {/* Bottom fade overlay */}
+        {/* Bottom fade */}
         <div
           className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-24"
           style={{ background: 'linear-gradient(to top, #000, transparent)' }}
@@ -237,9 +199,7 @@ export default function Home() {
                 return (
                   <div
                     key={i}
-                    ref={(el) => {
-                      lineRefs.current[i] = el
-                    }}
+                    ref={(el) => { lineRefs.current[i] = el }}
                     className="py-3 leading-tight transition-all duration-500 ease-out"
                     style={{ opacity, fontSize, fontWeight: isCurrent ? 700 : 400 }}
                   >
@@ -251,7 +211,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* Plain lyrics (no timestamps available) */}
+        {/* Plain lyrics */}
         {!lines.length && plain && (
           <div
             className="absolute inset-0 overflow-y-auto px-10 py-10"
@@ -266,38 +226,25 @@ export default function Home() {
           </div>
         )}
 
-        {/* Listening / idle state */}
+        {/* Waiting state */}
         {!lines.length && !plain && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-6">
-            {micError ? (
-              <p className="text-2xl text-red-400 text-center px-8">
-                Microphone access denied. Please allow microphone access and refresh.
-              </p>
-            ) : (
-              <>
-                <div className="flex gap-3">
-                  {[0, 1, 2].map((i) => (
-                    <div
-                      key={i}
-                      className="w-4 h-4 rounded-full animate-bounce"
-                      style={{
-                        background: 'rgba(255,255,255,0.3)',
-                        animationDelay: `${i * 0.15}s`,
-                      }}
-                    />
-                  ))}
-                </div>
-                {song ? (
-                  <p className="text-2xl" style={{ color: 'rgba(255,255,255,0.5)' }}>
-                    {song.title} · {song.artist}
-                  </p>
-                ) : (
-                  <p className="text-xl" style={{ color: 'rgba(255,255,255,0.3)' }}>
-                    {statusLabel[status]}
-                  </p>
-                )}
-              </>
+            {polling && (
+              <div className="flex gap-3">
+                {[0, 1, 2].map((i) => (
+                  <div
+                    key={i}
+                    className="w-4 h-4 rounded-full animate-bounce"
+                    style={{ background: 'rgba(255,255,255,0.3)', animationDelay: `${i * 0.15}s` }}
+                  />
+                ))}
+              </div>
             )}
+            <p className="text-xl" style={{ color: 'rgba(255,255,255,0.3)' }}>
+              {song
+                ? `${song.title} · ${song.artist}`
+                : 'Waiting for music to play on Spotify…'}
+            </p>
           </div>
         )}
       </div>
@@ -307,7 +254,7 @@ export default function Home() {
         className="flex-shrink-0 px-10 pb-6 pt-2 flex justify-between items-center text-sm"
         style={{ color: 'rgba(255,255,255,0.15)' }}
       >
-        <span>{statusLabel[status]}</span>
+        <span>{polling ? 'Listening via Spotify…' : ''}</span>
         <span>lyric wall</span>
       </div>
     </main>
