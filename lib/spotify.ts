@@ -99,6 +99,7 @@ async function getValidToken(): Promise<string | null> {
 export interface NowPlaying {
   title: string
   artist: string
+  artistId: string
   album: string
   albumArt: string
   progressMs: number
@@ -121,10 +122,37 @@ export async function getNowPlaying(): Promise<NowPlaying | null> {
   return {
     title: data.item.name,
     artist: data.item.artists?.[0]?.name ?? '',
+    artistId: data.item.artists?.[0]?.id ?? '',
     album: data.item.album?.name ?? '',
     albumArt: data.item.album?.images?.[0]?.url ?? '',
     progressMs: data.progress_ms ?? 0,
     durationMs: data.item.duration_ms ?? 0,
+  }
+}
+
+export interface ArtistInfo {
+  name: string
+  image: string
+  followers: number
+  genres: string[]
+}
+
+export async function getArtistInfo(artistId: string): Promise<ArtistInfo | null> {
+  const token = await getValidToken()
+  if (!token || !artistId) return null
+
+  const res = await fetch(`https://api.spotify.com/v1/artists/${artistId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+
+  if (!res.ok) return null
+
+  const data = await res.json()
+  return {
+    name: data.name ?? '',
+    image: data.images?.[0]?.url ?? '',
+    followers: data.followers?.total ?? 0,
+    genres: data.genres ?? [],
   }
 }
 

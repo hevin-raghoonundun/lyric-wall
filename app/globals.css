@@ -4,6 +4,11 @@ html,
 body {
   height: 100%;
   overflow: hidden;
-  background: #000;
+  background: #080808;
   color: #fff;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
