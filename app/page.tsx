@@ -13,8 +13,10 @@ interface Song {
 
 type Status = 'idle' | 'requesting' | 'listening' | 'identifying' | 'error'
 
-const RECORD_MS = 8000
-const POLL_MS = 15000
+// 4 seconds keeps PCM payload under 500KB (Shazam's limit)
+const RECORD_MS = 4000
+// 30 seconds between polls to stay within free tier (500 req/month)
+const POLL_MS = 30000
 
 export default function Home() {
   const [status, setStatus] = useState<Status>('idle')
@@ -42,28 +44,53 @@ export default function Home() {
 
     try {
       const stream = streamRef.current
-      const supported = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4']
-      const mimeType = supported.find((t) => MediaRecorder.isTypeSupported(t)) ?? ''
 
-      const chunks: BlobPart[] = []
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data)
+      // Shazam requires 44100Hz mono 16-bit PCM — capture via Web Audio API
+      const audioCtx = new AudioContext({ sampleRate: 44100 })
+      const source = audioCtx.createMediaStreamSource(stream)
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1)
+      const silence = audioCtx.createGain()
+      silence.gain.value = 0
+
+      const floatChunks: Float32Array[] = []
+      processor.onaudioprocess = (e) => {
+        floatChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
       }
 
-      await new Promise<void>((resolve) => {
-        recorder.onstop = () => resolve()
-        recorder.start()
-        setTimeout(() => recorder.stop(), RECORD_MS)
+      source.connect(processor)
+      processor.connect(silence)
+      silence.connect(audioCtx.destination)
+
+      await new Promise<void>((resolve) => setTimeout(resolve, RECORD_MS))
+
+      processor.disconnect()
+      source.disconnect()
+      audioCtx.close()
+
+      if (!floatChunks.length) return
+
+      // Merge chunks and convert Float32 → Int16 PCM
+      const totalSamples = floatChunks.reduce((s, c) => s + c.length, 0)
+      const float32 = new Float32Array(totalSamples)
+      let pos = 0
+      for (const chunk of floatChunks) { float32.set(chunk, pos); pos += chunk.length }
+
+      const int16 = new Int16Array(float32.length)
+      for (let i = 0; i < float32.length; i++) {
+        int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768))
+      }
+
+      // Base64 encode the raw PCM bytes
+      const uint8 = new Uint8Array(int16.buffer)
+      let binary = ''
+      for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i])
+      const audio = btoa(binary)
+
+      const r = await fetch('/api/recognize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audio }),
       })
-
-      if (!chunks.length) return
-
-      const blob = new Blob(chunks, { type: mimeType || 'audio/webm' })
-      const fd = new FormData()
-      fd.append('audio', blob, 'clip.webm')
-
-      const r = await fetch('/api/recognize', { method: 'POST', body: fd })
       if (!r.ok) return
 
       const data = await r.json()
